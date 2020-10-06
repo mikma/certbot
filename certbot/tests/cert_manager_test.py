@@ -7,7 +7,10 @@ import tempfile
 import unittest
 
 import configobj
-import mock
+try:
+    import mock
+except ImportError: # pragma: no cover
+    from unittest import mock
 
 from certbot import errors
 from certbot._internal import configuration
@@ -32,8 +35,8 @@ class BaseCertManagerTest(test_util.ConfigTestCase):
             "example.org": None,
             "other.com": os.path.join(self.config.config_dir, "specialarchive")
         }
-        self.config_files = dict((domain, self._set_up_config(domain, self.domains[domain]))
-            for domain in self.domains)
+        self.config_files = {domain: self._set_up_config(domain, self.domains[domain])
+            for domain in self.domains}
 
         # We also create a file that isn't a renewal config in the same
         # location to test that logic that reads in all-and-only renewal
@@ -77,8 +80,8 @@ class UpdateLiveSymlinksTest(BaseCertManagerTest):
                 archive_dir_path = custom_archive
             else:
                 archive_dir_path = os.path.join(self.config.default_archive_dir, domain)
-            archive_paths[domain] = dict((kind,
-                os.path.join(archive_dir_path, kind + "1.pem")) for kind in ALL_FOUR)
+            archive_paths[domain] = {kind:
+                os.path.join(archive_dir_path, kind + "1.pem") for kind in ALL_FOUR}
             for kind in ALL_FOUR:
                 live_path = self.config_files[domain][kind]
                 archive_path = archive_paths[domain][kind]
@@ -200,9 +203,11 @@ class CertificatesTest(BaseCertManagerTest):
         self.assertTrue(mock_utility.called)
         shutil.rmtree(empty_tempdir)
 
+    @mock.patch('certbot.crypto_util.get_serial_from_cert')
     @mock.patch('certbot._internal.cert_manager.ocsp.RevocationChecker.ocsp_revoked')
-    def test_report_human_readable(self, mock_revoked):
+    def test_report_human_readable(self, mock_revoked, mock_serial):
         mock_revoked.return_value = None
+        mock_serial.return_value = 1234567890
         from certbot._internal import cert_manager
         import datetime
         import pytz

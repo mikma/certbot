@@ -14,7 +14,10 @@ import dns.rdtypes.ANY.CNAME
 import dns.rdtypes.ANY.DNAME
 import dns.rdtypes.ANY.SOA
 import dns.tsig
-import mock
+try:
+    import mock
+except ImportError: # pragma: no cover
+    from unittest import mock # type: ignore
 
 from acme.magic_typing import Dict  # pylint: disable=unused-import, no-name-in-module
 

@@ -11,7 +11,7 @@ import josepy as jose
 import zope.component
 
 from acme import errors as acme_errors
-from acme.magic_typing import Union
+from acme.magic_typing import Union, Iterable, Optional  # pylint: disable=unused-import
 import certbot
 from certbot import crypto_util
 from certbot import errors
@@ -28,6 +28,7 @@ from certbot._internal import hooks
 from certbot._internal import log
 from certbot._internal import renewal
 from certbot._internal import reporter
+from certbot._internal import snap_config
 from certbot._internal import storage
 from certbot._internal import updater
 from certbot._internal.plugins import disco as plugins_disco
@@ -209,7 +210,7 @@ def _handle_identical_cert_request(config, lineage):
     elif config.verb == "certonly":
         keep_opt = "Keep the existing certificate for now"
     choices = [keep_opt,
-               "Renew & replace the cert (limit ~5 per 7 days)"]
+               "Renew & replace the cert (may be subject to CA rate limits)"]
 
     display = zope.component.getUtility(interfaces.IDisplay)
     response = display.menu(question, choices,
@@ -394,7 +395,7 @@ def _find_domains_or_certname(config, installer, question=None):
     :param installer: Installer object
     :type installer: interfaces.IInstaller
 
-    :param `str` question: Overriding dialog question to ask the user if asked
+    :param `str` question: Overriding default question to ask the user if asked
         to choose from domain names.
 
     :returns: Two-part tuple of domains and certname
@@ -590,7 +591,7 @@ def _init_le_client(config, authenticator, installer):
     :type config: interfaces.IConfig
 
     :param authenticator: Acme authentication handler
-    :type authenticator: interfaces.IAuthenticator
+    :type authenticator: Optional[interfaces.IAuthenticator]
     :param installer: Installer object
     :type installer: interfaces.IInstaller
 
@@ -703,17 +704,17 @@ def update_account(config, unused_plugins):
 
     if not accounts:
         return "Could not find an existing account to update."
-    if config.email is None:
-        if config.register_unsafely_without_email:
-            return ("--register-unsafely-without-email provided, however, a "
-                    "new e-mail address must\ncurrently be provided when "
-                    "updating a registration.")
+    if config.email is None and not config.register_unsafely_without_email:
         config.email = display_ops.get_email(optional=False)
 
     acc, acme = _determine_account(config)
     cb_client = client.Client(config, acc, None, None, acme=acme)
+    # Empty list of contacts in case the user is removing all emails
+
+    acc_contacts = () # type: Iterable[str]
+    if config.email:
+        acc_contacts = ['mailto:' + email for email in config.email.split(',')]
     # We rely on an exception to interrupt this process if it didn't work.
-    acc_contacts = ['mailto:' + email for email in config.email.split(',')]
     prev_regr_uri = acc.regr.uri
     acc.regr = cb_client.acme.update_registration(acc.regr.update(
         body=acc.regr.body.update(contact=acc_contacts)))
@@ -721,10 +722,16 @@ def update_account(config, unused_plugins):
     # the v2 uri. Since it's the same object on disk, put it back to the v1 uri
     # so that we can also continue to use the account object with acmev1.
     acc.regr = acc.regr.update(uri=prev_regr_uri)
-    account_storage.save_regr(acc, cb_client.acme)
-    eff.handle_subscription(config)
-    add_msg("Your e-mail address was updated to {0}.".format(config.email))
+    account_storage.update_regr(acc, cb_client.acme)
+
+    if config.email is None:
+        add_msg("Any contact information associated with this account has been removed.")
+    else:
+        eff.prepare_subscription(config, acc)
+        add_msg("Your e-mail address was updated to {0}.".format(config.email))
+
     return None
+
 
 def _install_cert(config, le_client, domains, lineage=None):
     """Install a cert
@@ -890,7 +897,7 @@ def enhance(config, plugins):
     """
     supported_enhancements = ["hsts", "redirect", "uir", "staple"]
     # Check that at least one enhancement was requested on command line
-    oldstyle_enh = any([getattr(config, enh) for enh in supported_enhancements])
+    oldstyle_enh = any(getattr(config, enh) for enh in supported_enhancements)
     if not enhancements.are_requested(config) and not oldstyle_enh:
         msg = ("Please specify one or more enhancement types to configure. To list "
                "the available enhancement types, run:\n\n%s --help enhance\n")
@@ -927,7 +934,7 @@ def enhance(config, plugins):
         config.chain_path = lineage.chain_path
     if oldstyle_enh:
         le_client = _init_le_client(config, authenticator=None, installer=installer)
-        le_client.enhance_config(domains, config.chain_path, ask_redirect=False)
+        le_client.enhance_config(domains, config.chain_path, redirect_default=False)
     if enhancements.are_requested(config):
         enhancements.enable(lineage, domains, installer, config)
 
@@ -1116,6 +1123,7 @@ def run(config, plugins):
         display_ops.success_renewal(domains)
 
     _suggest_donation_if_appropriate(config)
+    eff.handle_subscription(config, le_client.account)
     return None
 
 
@@ -1189,6 +1197,7 @@ def renew_cert(config, plugins, lineage):
         notify("new certificate deployed with reload of {0} server; fullchain is {1}".format(
                config.installer, lineage.fullchain), pause=False)
 
+
 def certonly(config, plugins):
     """Authenticate & obtain cert, but do not install it.
 
@@ -1220,6 +1229,7 @@ def certonly(config, plugins):
         cert_path, fullchain_path = _csr_get_and_save_cert(config, le_client)
         _report_new_cert(config, cert_path, fullchain_path)
         _suggest_donation_if_appropriate(config)
+        eff.handle_subscription(config, le_client.account)
         return
 
     domains, certname = _find_domains_or_certname(config, installer)
@@ -1237,6 +1247,8 @@ def certonly(config, plugins):
     key_path = lineage.key_path if lineage else None
     _report_new_cert(config, cert_path, fullchain_path, key_path)
     _suggest_donation_if_appropriate(config)
+    eff.handle_subscription(config, le_client.account)
+
 
 def renew(config, unused_plugins):
     """Renew previously-obtained certificates.
@@ -1313,6 +1325,9 @@ def main(cli_args=None):
         cli_args = sys.argv[1:]
 
     log.pre_arg_parse_setup()
+
+    if os.environ.get('CERTBOT_SNAPPED') == 'True':
+        cli_args = snap_config.prepare_env(cli_args)
 
     plugins = plugins_disco.PluginsRegistry.find_all()
     logger.debug("certbot version: %s", certbot.__version__)
