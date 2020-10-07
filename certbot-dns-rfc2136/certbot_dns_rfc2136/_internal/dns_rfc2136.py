@@ -7,6 +7,7 @@ import dns.name
 import dns.query
 import dns.rdataclass
 import dns.rdatatype
+import dns.resolver
 import dns.tsig
 import dns.tsigkeyring
 import dns.update
@@ -285,11 +286,17 @@ class _RFC2136Client(object):
 
         try:
             logmsg = 'Query '+str(domain)
+            resolver = dns.resolver.get_default_resolver()
+            nameserver = resolver.nameservers[0]
+            if nameserver in resolver.nameserver_ports:
+                port = resolver.nameserver_ports[nameserver]
+            else:
+                port = 53
             try:
-                response = dns.query.tcp(request, self.server, port=self.port)
+                response = dns.query.tcp(request, nameserver, port)
             except OSError as e:
                 logger.debug('TCP query failed, fallback to UDP: %s', e)
-                response = dns.query.udp(request, self.server, port=self.port)
+                response = dns.query.udp(request, nameserver, port)
             rcode = response.rcode()
             logmsg += ': '+dns.rcode.to_text(rcode)
 
